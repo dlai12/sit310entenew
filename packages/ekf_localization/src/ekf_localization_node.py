@@ -10,6 +10,7 @@ from typing import Optional
 from dt_computer_vision.camera import CameraModel
 from dt_computer_vision.camera.types import Rectifier
 from dt_apriltags import Detector
+from duckietown_msgs.msg import AprilTagDetectionArray, AprilTagDetection
 from turbojpeg import TurboJPEG
 from duckietown_msgs.msg import Twist2DStamped, WheelEncoderStamped
 from sensor_msgs.msg import CompressedImage, CameraInfo
@@ -17,7 +18,6 @@ from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Pose, PoseWithCovariance
-from solution.ekf import EKF
 from ekf_localization.include.odometry_utils import delta_phi, get_odometry
 from duckietown.dtros import DTROS, NodeType, TopicType
 from duckietown.utils.image.ros import compressed_imgmsg_to_rgb, rgb_to_compressed_imgmsg
@@ -90,7 +90,7 @@ class EKFLocalizationNode(DTROS):
             [ rospy.get_param("~R_rr", 0.0), 0.0 ],
             [ 0.0, rospy.get_param("~R_tt", 0.0) ],
         ])
-        self.ekf = EKF(q_0, P_0, Q, R)
+       
 
         map_file = rospy.get_param("~map", None)
         if map_file is None:
@@ -151,25 +151,18 @@ class EKFLocalizationNode(DTROS):
             latch=True
         )
 
-        self.pub_pose_covariance = rospy.Publisher(
-            f"/{self.veh}/ekf_localization_node/pose",
-            Odometry,
+        
+        self.pub_tag_detections = rospy.Publisher(
+            f"{self.veh}/detections",
+            AprilTagDetectionArray,
             queue_size=1,
-            dt_topic_type=TopicType.LOCALIZATION,
-            latch=True
-        )
-
-        self.pub_landmark_markers = rospy.Publisher(
-            f"/{self.veh}/map_markers",
-            MarkerArray,
-            queue_size=1,
-            latch=True
+            dt_topic_type=TopicType.PERCEPTION,
+            dt_help="Tag detections",
         )
 
         # Need to sleep for a bit for the publisher to register with master
         rospy.sleep(0.5)
-        self.publish_landmarks([])
-        self.publish_pose()
+     
 
         # we will do prediction at a fixed frequency rather than asynchronously
         # when the encoder data arrives
@@ -248,7 +241,6 @@ class EKFLocalizationNode(DTROS):
                     self.delta_phi_right
                 )
 
-                self.ekf.predict(dX, dT)
                 self.delta_phi_left = 0
                 self.delta_phi_right = 0
                 self.doUpdate()
@@ -324,6 +316,8 @@ class EKFLocalizationNode(DTROS):
             tag_size=tag_size
         )
         
+        tags_msg = AprilTagDetectionArray()
+  
         # Process each detection
         for detection in detections:
             tag_id = detection.tag_id
@@ -363,97 +357,43 @@ class EKFLocalizationNode(DTROS):
                 range_estimate = sim_range_estimate
                 bearing = sim_bearing
 
-            # Update the EKF with this measurement
-            self.ekf.update([range_estimate, bearing], [tag_x, tag_y])
-            
+                  
             # Print data to screen
-            print(f"Detected ID= {detection.tag_id} Bearing= {bearing} Distance= {range_estimate}" )
+            self.tag_id=detection.tag_id
+            self.bearing=bearing
+            self.range_estimate=range_estimate
+            print(f"Detected ID= {detection.tag_id}  Bearing= {bearing} Distance= {range_estimate}")
+            print(f"Pose_error={detection.pose_err} Center= {detection.center.tolist()}" )
             
+            # Pack data into a message
+            detection_f = AprilTagDetection(
+                transform=Transform(
+                    translation=Vector3(x=p[0], y=p[1], z=p[2]),
+                    rotation=Quaternion(x=q[0], y=q[1], z=q[2], w=q[3]),
+                ),
+                tag_id=detection.tag_id,
+                tag_family=str(detection.tag_family),
+                hamming=detection.hamming,
+                decision_margin=detection.decision_margin,
+                homography=detection.homography.flatten().astype(np.float32).tolist(),
+                center=detection.center.tolist(),
+                corners=detection.corners.flatten().tolist(),
+                pose_error=detection.pose_err,
+            )
+            # add detection to array
+            tags_msg.detections.append(detection_f)
+
+                        
         ids = [det.tag_id for det in detections]
         # remove landmarks publishing
         # self.publish_landmarks(ids)
         
+        # publish detections
+        self.pub_tag_detections.publish(tags_msg) 
         self.publish_detections(image_gray, detections, self.latest_img.header)
         self.publish_pose(self.latest_img.header)
 
-    def publish_pose(self, header=None):
-
-        pose_cov= PoseWithCovariance()
-        pose_cov.pose.position.x = self.ekf.q[0]
-        pose_cov.pose.position.y = self.ekf.q[1]
-        pose_cov.pose.position.z = 0.0
-
-        pose_cov.pose.orientation.x = 0.0
-        pose_cov.pose.orientation.y = 0.0
-        pose_cov.pose.orientation.z = np.sin(self.ekf.q[2] / 2)
-        pose_cov.pose.orientation.w = np.cos(self.ekf.q[2] / 2)
-
-        pose_cov.covariance = [
-            self.ekf.P[0, 0], self.ekf.P[0, 1], 0.0, 0.0, 0.0, self.ekf.P[0, 2] ,
-            self.ekf.P[1, 0], self.ekf.P[1, 1], 0.0, 0.0, 0.0, self.ekf.P[1, 2] ,
-            0, 0, 1, 0, 0, 0,
-            0, 0, 0, 1, 0, 0,
-            0, 0, 0, 0, 1, 0,
-            self.ekf.P[2, 0], self.ekf.P[2, 1], 0.0, 0.0, 0.0, self.ekf.P[2, 2]
-        ]
-        odom_msg = Odometry()
-        if header is None:
-            odom_msg.header.stamp = rospy.Time.now()
-        else:
-            odom_msg.header = header
-        odom_msg.header.frame_id = "map"
-        odom_msg.pose = pose_cov
-
-        self.pub_pose_covariance.publish(odom_msg)
-
-
-    def resetParameters(self):
-
-        self.log("Encoder data resetting")
-        self.delta_phi_left = 0.0
-        self.left_tick_prev = None
-
-        self.delta_phi_right = 0.0
-        self.right_tick_prev = None
-
-    def publish_landmarks(self, detection_ids):
-        # publishes the whole map as markers and colors the ones that were detected
-
-        marker_array = MarkerArray()
-        for i, (landmark_id, position) in enumerate(self.map.items()):
-
-
-            m = Marker()
-            m.header.frame_id = "map"
-            m.header.stamp = rospy.Time.now()
-            m.ns = "landmarks"
-            m.id = int(landmark_id)
-            m.type = Marker.SPHERE
-            m.action = Marker.ADD
-
-            m.pose.position.x = position[0]
-            m.pose.position.y = position[1]
-            m.pose.position.z = 0.0
-            m.pose.orientation.w = 1.0
-
-            m.scale.x = 0.15
-            m.scale.y = 0.15
-            m.scale.z = 0.15
-            if landmark_id in detection_ids:
-                m.color.r = 0.0
-                m.color.g = 0.0
-                m.color.b = 1.0
-                m.color.a = 1.0
-            else:
-                m.color.r = 0.0
-                m.color.g = 1.0
-                m.color.b = 0.0
-                m.color.a = 1.0
-
-
-            marker_array.markers.append(m)
-        self.pub_landmark_markers.publish(marker_array)
-
+   
     def publish_detections(self, img, detections, header):
 
         # get a color buffer from the BW image
