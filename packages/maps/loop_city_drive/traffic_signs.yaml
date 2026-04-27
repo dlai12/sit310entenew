@@ -1,0 +1,27 @@
+version: 1.0
+traffic_signs:
+  map_0/sign_stop_0:
+    id: 0
+    type: sign_stop
+    family: 36h11
+  map_0/sign_stop_1:
+    id: 1
+    type: sign_stop
+    family: 36h11
+  map_0/sign_oneway_left_0:
+    id: 2
+    type: sign_oneway_left
+    family: 36h11
+  map_0/sign_oneway_right_0:
+    id: 3
+    type: sign_oneway_right
+    family: 36h11
+  map_0/sign_oneway_left_1:
+    id: 2
+    type: sign_oneway_left
+    family: 36h11
+  map_0/sign_oneway_right_1:
+    id: 3
+    type: sign_oneway_right
+    family: 36h11
+  

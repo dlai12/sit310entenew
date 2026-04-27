@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Modified from Duckietown lx-ekf-localization for use with dts devel build/ docker containers
+# Allows Apriltag detector to work for ente due to issue with duckietown_demo apriltag demo 
+# Additional outputs to tags also provided
+# v.1.0 Daniel Lai (daniel.lai@deakin.edu.au)
 
 import cv2
 import rospy
@@ -57,7 +61,12 @@ class EKFLocalizationNode(DTROS):
         self.latest_img = None
 
         # Init the parameters
-        self.resetParameters()
+        self.log("Encoder data resetting")
+        self.delta_phi_left = 0.0
+        self.left_tick_prev = None
+
+        self.delta_phi_right = 0.0
+        self.right_tick_prev = None
 
         # nominal R and L, you may change these if needed:
 
@@ -142,6 +151,7 @@ class EKFLocalizationNode(DTROS):
             queue_size=1,
         )
 
+        # Defining publishers:
         self.pub_detections = rospy.Publisher(
             f"/{self.veh}/detections/image/compressed",
             CompressedImage,
@@ -153,7 +163,7 @@ class EKFLocalizationNode(DTROS):
 
         
         self.pub_tag_detections = rospy.Publisher(
-            f"{self.veh}/detections",
+            f"/{self.veh}/apriltag_id/detections",
             AprilTagDetectionArray,
             queue_size=1,
             dt_topic_type=TopicType.PERCEPTION,
@@ -317,7 +327,9 @@ class EKFLocalizationNode(DTROS):
         )
         
         tags_msg = AprilTagDetectionArray()
-  
+        tags_msg.header.stamp = msg.header.stamp
+        tags_msg.header.frame_id = msg.header.frame_id
+        
         # Process each detection
         for detection in detections:
             tag_id = detection.tag_id
@@ -367,10 +379,6 @@ class EKFLocalizationNode(DTROS):
             
             # Pack data into a message
             detection_f = AprilTagDetection(
-                transform=Transform(
-                    translation=Vector3(x=p[0], y=p[1], z=p[2]),
-                    rotation=Quaternion(x=q[0], y=q[1], z=q[2], w=q[3]),
-                ),
                 tag_id=detection.tag_id,
                 tag_family=str(detection.tag_family),
                 hamming=detection.hamming,
@@ -388,10 +396,9 @@ class EKFLocalizationNode(DTROS):
         # remove landmarks publishing
         # self.publish_landmarks(ids)
         
-        # publish detections
+        # publish detections regardless of whether a tag is detected to show the detector is still running
         self.pub_tag_detections.publish(tags_msg) 
-        self.publish_detections(image_gray, detections, self.latest_img.header)
-        self.publish_pose(self.latest_img.header)
+ 
 
    
     def publish_detections(self, img, detections, header):
